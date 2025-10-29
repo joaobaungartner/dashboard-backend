@@ -5,6 +5,7 @@ from typing import List, Optional
 from pathlib import Path
 import pandas as pd
 import os
+import numpy as np
 
 EXCEL_FILE = os.getenv("EXCEL_FILE", "Base_Kaiserhaus.xlsx")
 DATA_PATH = Path(__file__).resolve().parents[1] / "data" / EXCEL_FILE
@@ -43,6 +44,52 @@ def load_excel(path: Path) -> pd.DataFrame:
     df = pd.read_excel(path, engine="openpyxl")
     df.columns = [str(c) for c in df.columns]
     return df
+
+COLUMN_ALIASES = {
+    "order_id": ["order_id", "id_pedido", "pedido_id", "id"],
+    "order_datetime": ["order_datetime", "data_pedido", "created_at", "order_date"],
+    "order_date": ["order_date", "data", "dt", "date"],
+    "platform": ["platform", "plataforma"],
+    "order_mode": ["order_mode", "modo_pedido", "channel"],
+    "status": ["status", "order_status"],
+    "macro_bairro": ["macro_bairro", "macro_bairros", "macro_bairro_nome"],
+    "total_brl": ["total_brl", "valor_total", "total"],
+    "num_itens": ["num_itens", "qtd_itens", "items_count"],
+    "tempo_preparo_minutos": ["tempo_preparo_minutos", "prep_minutes", "preparo_min"],
+    "actual_delivery_minutes": ["actual_delivery_minutes", "delivery_minutes", "tempo_entrega_min"],
+    "eta_minutes_quote": ["eta_minutes_quote", "eta_minutos", "eta_min"],
+    "distance_km": ["distance_km", "distancia_km", "km"],
+    "platform_commision_pct": ["platform_commision_pct", "platform_commission_pct", "taxa_plataforma"],
+    "satisfacao_nivel": ["satisfacao_nivel", "satisfacao", "satisfaction", "nota"],
+    "cliente_id": ["cliente_id", "customer_id", "id_cliente"],
+}
+
+def resolve_column(df: pd.DataFrame, preferred: Optional[str], logical_name: str) -> Optional[str]:
+    if preferred and preferred in df.columns:
+        return preferred
+    for alias in COLUMN_ALIASES.get(logical_name, []):
+        if alias in df.columns:
+            return alias
+    return None
+
+def require_columns(df: pd.DataFrame, columns: List[str]):
+    missing = [c for c in columns if c not in df.columns]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"Colunas ausentes: {missing}")
+
+def ensure_datetime(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        raise HTTPException(status_code=400, detail=f"Coluna de data inválida: {col}")
+    s = df[col]
+    if not pd.api.types.is_datetime64_any_dtype(s):
+        s = pd.to_datetime(s, errors="coerce")
+    return s
+
+def safe_mean(series: pd.Series) -> float:
+    return float(np.nanmean(series.astype(float))) if len(series) else 0.0
+
+def to_records(df: pd.DataFrame) -> List[dict]:
+    return df.reset_index(drop=True).to_dict(orient="records")
 
 def filter_df(df: pd.DataFrame, q: Optional[str]) -> pd.DataFrame:
     if not q:
@@ -142,6 +189,361 @@ def feature_summary(column: str):
     else:
         counts = s.astype(str).value_counts(dropna=False).head(20).to_dict()
         return {"column": column, "type": "categorical", "top_counts": counts}
+
+@app.get("/api/dashboard/overview/kpis")
+def overview_kpis(
+    date_col: Optional[str] = Query(None),
+    total_col: Optional[str] = Query(None),
+    items_col: Optional[str] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    num_itens_col = resolve_column(df, items_col, "num_itens")
+
+    total_pedidos = int(len(df))
+    receita_total = float(df[total_brl_col].sum()) if total_brl_col else 0.0
+    ticket_medio = float((df[total_brl_col] / df[num_itens_col]).mean()) if (total_brl_col and num_itens_col) else 0.0
+
+    dt_col = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
+    periodo = None
+    if dt_col:
+        sdt = ensure_datetime(df, dt_col)
+        periodo = {"min": sdt.min(), "max": sdt.max()}
+
+    return {
+        "total_pedidos": total_pedidos,
+        "receita_total": receita_total,
+        "ticket_medio": ticket_medio,
+        "periodo": periodo,
+    }
+
+@app.get("/api/dashboard/overview/timeseries_orders")
+def overview_timeseries_orders(
+    date_col: Optional[str] = Query(None),
+    freq: str = Query("D", description="D, W, M"),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    dt_col = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
+    if not dt_col:
+        raise HTTPException(status_code=400, detail="Coluna de data não encontrada.")
+    sdt = ensure_datetime(df, dt_col)
+    ts = (
+        sdt.to_frame(name="dt")
+        .set_index("dt")
+        .assign(v=1)
+        .resample(freq)["v"].sum()
+        .fillna(0)
+        .reset_index()
+        .rename(columns={"dt": "date", "v": "orders"})
+    )
+    return {"data": to_records(ts)}
+
+@app.get("/api/dashboard/overview/by_platform")
+def overview_by_platform(platform_col: Optional[str] = Query(None)):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    platform = resolve_column(df, platform_col, "platform")
+    if not platform:
+        raise HTTPException(status_code=400, detail="Coluna de plataforma não encontrada.")
+    g = df.groupby(platform).size().reset_index(name="orders").sort_values("orders", ascending=False)
+    return {"data": to_records(g)}
+
+@app.get("/api/dashboard/overview/status_distribution")
+def overview_status_distribution(status_col: Optional[str] = Query(None)):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    status = resolve_column(df, status_col, "status")
+    if not status:
+        raise HTTPException(status_code=400, detail="Coluna de status não encontrada.")
+    dist = df[status].astype(str).value_counts(dropna=False).reset_index()
+    dist.columns = ["status", "count"]
+    return {"data": to_records(dist)}
+
+@app.get("/api/dashboard/overview/macro_bairro_avg_receita")
+def overview_macro_bairro_avg_receita(
+    macro_col: Optional[str] = Query(None), total_col: Optional[str] = Query(None)
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    macro = resolve_column(df, macro_col, "macro_bairro")
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    if not macro or not total_brl_col:
+        raise HTTPException(status_code=400, detail="Colunas de macro_bairro/total_brl não encontradas.")
+    g = df.groupby(macro)[total_brl_col].mean().reset_index(name="avg_receita")
+    return {"data": to_records(g.sort_values("avg_receita", ascending=False))}
+
+@app.get("/api/dashboard/ops/kpis")
+def ops_kpis(
+    prep_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    distance_col: Optional[str] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    prep = resolve_column(df, prep_col, "tempo_preparo_minutos")
+    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    eta = resolve_column(df, eta_col, "eta_minutes_quote")
+    distance = resolve_column(df, distance_col, "distance_km")
+
+    tempo_medio_preparo = safe_mean(df[prep]) if prep else 0.0
+    tempo_medio_entrega = safe_mean(df[delivery]) if delivery else 0.0
+    atraso_medio = safe_mean(df[delivery] - df[eta]) if (delivery and eta) else 0.0
+    distancia_media = safe_mean(df[distance]) if distance else 0.0
+
+    return {
+        "tempo_medio_preparo": tempo_medio_preparo,
+        "tempo_medio_entrega": tempo_medio_entrega,
+        "atraso_medio": atraso_medio,
+        "distancia_media": distancia_media,
+    }
+
+@app.get("/api/dashboard/ops/timeseries_delivery")
+def ops_timeseries_delivery(
+    date_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None), freq: str = "D"
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    dt_col = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
+    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    if not dt_col or not delivery:
+        raise HTTPException(status_code=400, detail="Colunas de data/tempo de entrega não encontradas.")
+    sdt = ensure_datetime(df, dt_col)
+    ts = (
+        pd.DataFrame({"dt": sdt, "v": pd.to_numeric(df[delivery], errors="coerce")})
+        .dropna()
+        .set_index("dt")
+        .resample(freq)["v"].mean()
+        .reset_index()
+        .rename(columns={"dt": "date", "v": "avg_delivery_minutes"})
+    )
+    return {"data": to_records(ts)}
+
+@app.get("/api/dashboard/ops/boxplot_delivery_by_macro")
+def ops_boxplot_delivery_by_macro(
+    macro_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None)
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    macro = resolve_column(df, macro_col, "macro_bairro")
+    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    if not macro or not delivery:
+        raise HTTPException(status_code=400, detail="Colunas de macro_bairro/tempo de entrega não encontradas.")
+    grouped = (
+        df[[macro, delivery]]
+        .dropna()
+        .groupby(macro)[delivery]
+        .apply(lambda s: list(pd.to_numeric(s, errors="coerce").dropna()))
+        .reset_index(name="values")
+    )
+    return {"data": to_records(grouped)}
+
+@app.get("/api/dashboard/ops/heatmap_delay_by_macro")
+def ops_heatmap_delay_by_macro(
+    macro_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None), eta_col: Optional[str] = Query(None)
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    macro = resolve_column(df, macro_col, "macro_bairro")
+    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    eta = resolve_column(df, eta_col, "eta_minutes_quote")
+    if not macro or not delivery or not eta:
+        raise HTTPException(status_code=400, detail="Colunas de macro_bairro/entrega/eta não encontradas.")
+    tmp = df[[macro, delivery, eta]].copy()
+    tmp["delay"] = pd.to_numeric(tmp[delivery], errors="coerce") - pd.to_numeric(tmp[eta], errors="coerce")
+    heat = tmp.groupby(macro)["delay"].mean().reset_index()
+    return {"data": to_records(heat.rename(columns={"delay": "avg_delay"}))}
+
+@app.get("/api/dashboard/ops/scatter_distance_vs_delivery")
+def ops_scatter_distance_vs_delivery(
+    distance_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None)
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    distance = resolve_column(df, distance_col, "distance_km")
+    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    if not distance or not delivery:
+        raise HTTPException(status_code=400, detail="Colunas de distância/entrega não encontradas.")
+    tmp = pd.DataFrame({
+        "x": pd.to_numeric(df[distance], errors="coerce"),
+        "y": pd.to_numeric(df[delivery], errors="coerce"),
+    }).dropna()
+    return {"data": to_records(tmp.rename(columns={"x": "distance_km", "y": "delivery_minutes"}))}
+
+@app.get("/api/dashboard/finance/kpis")
+def finance_kpis(
+    total_col: Optional[str] = Query(None),
+    pct_col: Optional[str] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    pct = resolve_column(df, pct_col, "platform_commision_pct")
+    receita_total = float(df[total_brl_col].sum()) if total_brl_col else 0.0
+    receita_liquida = float((df[total_brl_col] * (1 - pd.to_numeric(df[pct], errors="coerce"))).sum()) if (total_brl_col and pct) else 0.0
+    return {
+        "receita_total": receita_total,
+        "receita_liquida": receita_liquida,
+    }
+
+@app.get("/api/dashboard/finance/timeseries_revenue")
+def finance_timeseries_revenue(
+    date_col: Optional[str] = Query(None), total_col: Optional[str] = Query(None), pct_col: Optional[str] = Query(None), freq: str = "D"
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    dt_col = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    pct = resolve_column(df, pct_col, "platform_commision_pct")
+    if not dt_col or not total_brl_col:
+        raise HTTPException(status_code=400, detail="Colunas de data/total_brl não encontradas.")
+    sdt = ensure_datetime(df, dt_col)
+    gross = pd.DataFrame({"dt": sdt, "gross": pd.to_numeric(df[total_brl_col], errors="coerce")}).dropna()
+    ts_gross = gross.set_index("dt").resample(freq)["gross"].sum()
+    if pct and pct in df.columns:
+        net_val = pd.to_numeric(df[total_brl_col], errors="coerce") * (1 - pd.to_numeric(df[pct], errors="coerce"))
+        net = pd.DataFrame({"dt": sdt, "net": net_val}).dropna()
+        ts_net = net.set_index("dt").resample(freq)["net"].sum()
+        ts = pd.concat([ts_gross, ts_net], axis=1).reset_index().fillna(0)
+    else:
+        ts = ts_gross.reset_index()
+    ts = ts.rename(columns={"dt": "date"})
+    return {"data": to_records(ts)}
+
+@app.get("/api/dashboard/finance/margin_by_platform")
+def finance_margin_by_platform(
+    platform_col: Optional[str] = Query(None), total_col: Optional[str] = Query(None), pct_col: Optional[str] = Query(None)
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    platform = resolve_column(df, platform_col, "platform")
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    pct = resolve_column(df, pct_col, "platform_commision_pct")
+    if not platform or not total_brl_col or not pct:
+        raise HTTPException(status_code=400, detail="Colunas de plataforma/total_brl/comissão não encontradas.")
+    tmp = df[[platform, total_brl_col, pct]].copy()
+    tmp["net"] = pd.to_numeric(tmp[total_brl_col], errors="coerce") * (1 - pd.to_numeric(tmp[pct], errors="coerce"))
+    g = tmp.groupby(platform).agg(gross=(total_brl_col, "mean"), net=("net", "mean")).reset_index()
+    g["margin_pct"] = (g["net"] / g["gross"]).replace({np.inf: np.nan}).fillna(0)
+    return {"data": to_records(g.sort_values("margin_pct", ascending=False))}
+
+@app.get("/api/dashboard/finance/revenue_by_class")
+def finance_revenue_by_class(class_col: str = Query(...), total_col: Optional[str] = Query(None)):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    if not total_brl_col or class_col not in df.columns:
+        raise HTTPException(status_code=400, detail="Colunas inválidas para receita por classe.")
+    g = df.groupby(class_col)[total_brl_col].sum().reset_index(name="revenue")
+    return {"data": to_records(g.sort_values("revenue", ascending=False))}
+
+@app.get("/api/dashboard/finance/top_clients")
+def finance_top_clients(
+    client_col: Optional[str] = Query(None), total_col: Optional[str] = Query(None), top_n: int = 10
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    client = resolve_column(df, client_col, "cliente_id")
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    if not client or not total_brl_col:
+        raise HTTPException(status_code=400, detail="Colunas de cliente/total_brl não encontradas.")
+    g = df.groupby(client)[total_brl_col].sum().reset_index(name="spent")
+    g = g.sort_values("spent", ascending=False).head(top_n)
+    return {"data": to_records(g)}
+
+@app.get("/api/dashboard/satisfaction/kpis")
+def satisfaction_kpis(score_col: Optional[str] = Query(None)):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    score = resolve_column(df, score_col, "satisfacao_nivel")
+    if not score:
+        raise HTTPException(status_code=400, detail="Coluna de satisfação não encontrada.")
+    s = pd.to_numeric(df[score], errors="coerce")
+    nivel_medio = float(s.mean()) if len(s) else 0.0
+    pct_muito_satisfeitos = float((s >= 4.5).mean() * 100) if len(s) else 0.0
+    return {"nivel_medio": nivel_medio, "%_muito_satisfeitos": pct_muito_satisfeitos}
+
+@app.get("/api/dashboard/satisfaction/by_macro_bairro")
+def satisfaction_by_macro_bairro(macro_col: Optional[str] = Query(None), score_col: Optional[str] = Query(None)):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    macro = resolve_column(df, macro_col, "macro_bairro")
+    score = resolve_column(df, score_col, "satisfacao_nivel")
+    if not macro or not score:
+        raise HTTPException(status_code=400, detail="Colunas de macro_bairro/satisfação não encontradas.")
+    g = df.groupby(macro)[score].mean().reset_index(name="avg_satisfacao")
+    return {"data": to_records(g.sort_values("avg_satisfacao", ascending=False))}
+
+@app.get("/api/dashboard/satisfaction/scatter_time_vs_score")
+def satisfaction_scatter_time_vs_score(
+    delivery_col: Optional[str] = Query(None), score_col: Optional[str] = Query(None)
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    score = resolve_column(df, score_col, "satisfacao_nivel")
+    if not delivery or not score:
+        raise HTTPException(status_code=400, detail="Colunas de entrega/satisfação não encontradas.")
+    tmp = pd.DataFrame({
+        "x": pd.to_numeric(df[delivery], errors="coerce"),
+        "y": pd.to_numeric(df[score], errors="coerce"),
+    }).dropna()
+    return {"data": to_records(tmp.rename(columns={"x": "delivery_minutes", "y": "satisfacao"}))}
+
+@app.get("/api/dashboard/satisfaction/timeseries")
+def satisfaction_timeseries(
+    date_col: Optional[str] = Query(None), score_col: Optional[str] = Query(None), freq: str = "D"
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    dt_col = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
+    score = resolve_column(df, score_col, "satisfacao_nivel")
+    if not dt_col or not score:
+        raise HTTPException(status_code=400, detail="Colunas de data/satisfação não encontradas.")
+    sdt = ensure_datetime(df, dt_col)
+    ts = (
+        pd.DataFrame({"dt": sdt, "v": pd.to_numeric(df[score], errors="coerce")})
+        .dropna()
+        .set_index("dt")
+        .resample(freq)["v"].mean()
+        .reset_index()
+        .rename(columns={"dt": "date", "v": "avg_satisfacao"})
+    )
+    return {"data": to_records(ts)}
+
+@app.get("/api/dashboard/satisfaction/heatmap_platform")
+def satisfaction_heatmap_platform(platform_col: Optional[str] = Query(None), score_col: Optional[str] = Query(None)):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    platform = resolve_column(df, platform_col, "platform")
+    score = resolve_column(df, score_col, "satisfacao_nivel")
+    if not platform or not score:
+        raise HTTPException(status_code=400, detail="Colunas de plataforma/satisfação não encontradas.")
+    g = df.groupby(platform)[score].mean().reset_index(name="avg_satisfacao")
+    return {"data": to_records(g)}
 
 if __name__ == "__main__":
     import uvicorn
