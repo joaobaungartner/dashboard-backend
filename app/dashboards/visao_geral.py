@@ -1,6 +1,7 @@
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 import pandas as pd
+import numpy as np  # ✅ usar numpy direto
 from app.main import state, resolve_column, ensure_datetime, to_records
 
 router = APIRouter()
@@ -167,16 +168,24 @@ def overview_ticket_histogram(
     num_itens_col = resolve_column(df, items_col, "num_itens")
     if not total_brl_col or not num_itens_col:
         raise HTTPException(status_code=400, detail="Colunas total_brl/num_itens não encontradas.")
-    ticket = pd.to_numeric(df[total_brl_col], errors="coerce") / pd.to_numeric(df[num_itens_col], errors="coerce")
-    ticket = ticket.replace([pd.NA, pd.NaT], None).dropna()
+
+    total_brl = pd.to_numeric(df[total_brl_col], errors="coerce")
+    num_itens = pd.to_numeric(df[num_itens_col], errors="coerce")
+
+    mask = (num_itens.notna()) & (num_itens > 0)
+    ticket = (total_brl[mask] / num_itens[mask]).dropna()
+
     if len(ticket) == 0:
         return {"data": []}
-    counts, edges = pd.np.histogram(ticket, bins=bins)  # type: ignore[attr-defined]
+
+    counts, edges = np.histogram(ticket, bins=bins)
+
     payload = [
-        {"bin_start": float(edges[i]), "bin_end": float(edges[i+1]), "count": int(counts[i])}
+        {"bin_start": float(edges[i]), "bin_end": float(edges[i + 1]), "count": int(counts[i])}
         for i in range(len(counts))
     ]
     return {"data": payload}
+
 
 @router.get("/macro_bairro_avg_receita")
 def overview_macro_bairro_avg_receita(
@@ -193,3 +202,33 @@ def overview_macro_bairro_avg_receita(
     return {"data": to_records(g.sort_values("avg_receita", ascending=False))}
 
 
+# Dados para choropleth por macro_bairro (para react-simple-maps)
+# metric: 'avg_receita' | 'orders' | 'total_receita'
+@router.get("/macro_bairro_choropleth")
+def overview_macro_bairro_choropleth(
+    metric: str = Query("avg_receita"),
+    macro_col: Optional[str] = Query(None),
+    total_col: Optional[str] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df
+    macro = resolve_column(df, macro_col, "macro_bairro")
+    total_brl_col = resolve_column(df, total_col, "total_brl")
+    if not macro:
+        raise HTTPException(status_code=400, detail="Coluna de macro_bairro não encontrada.")
+
+    metric = (metric or "avg_receita").lower()
+    if metric == "orders":
+        g = df.groupby(macro).size().reset_index(name="value")
+    elif metric == "total_receita":
+        if not total_brl_col:
+            raise HTTPException(status_code=400, detail="Coluna total_brl não encontrada para total_receita.")
+        g = df.groupby(macro)[total_brl_col].sum().reset_index(name="value")
+    else:  # avg_receita
+        if not total_brl_col:
+            raise HTTPException(status_code=400, detail="Coluna total_brl não encontrada para avg_receita.")
+        g = df.groupby(macro)[total_brl_col].mean().reset_index(name="value")
+
+    g = g.rename(columns={macro: "macro_bairro"})
+    return {"data": to_records(g)}
