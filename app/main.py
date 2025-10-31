@@ -7,6 +7,12 @@ import os
 import pandas as pd
 import numpy as np
 
+from app.dashboards.desempenho_operacional import router as ops_router
+from app.dashboards.visao_geral import router as overview_router
+from app.dashboards.satisfacao import router as satisfaction_router
+from app.dashboards.meta import router as meta_router
+from app.dashboards.financeiro import router as finance_router
+
 # Core/shared state and helpers (previously in core.py)
 EXCEL_FILE = os.getenv("EXCEL_FILE", "Base_Kaiserhaus.xlsx")
 DATA_PATH = Path(__file__).resolve().parents[1] / "data" / EXCEL_FILE
@@ -72,10 +78,6 @@ def ensure_datetime(df: pd.DataFrame, col: str) -> pd.Series:
 def to_records(df: pd.DataFrame) -> List[dict]:
     return df.reset_index(drop=True).to_dict(orient="records")
 
-from app.dashboards.desempenho_operacional import router as ops_router
-from app.dashboards.visao_geral import router as overview_router
-from app.dashboards.satisfacao import router as satisfaction_router
-
 app = FastAPI(
     title="Kaiserhaus Data API",
     version="1.0.0",
@@ -121,6 +123,8 @@ def select_columns(df: pd.DataFrame, columns: Optional[List[str]]) -> pd.DataFra
 app.include_router(ops_router, prefix="/api/dashboard/ops", tags=["ops"])
 app.include_router(overview_router, prefix="/api/dashboard/overview", tags=["overview"])
 app.include_router(satisfaction_router, prefix="/api/dashboard/satisfaction", tags=["satisfaction"])
+app.include_router(meta_router, prefix="/api/dashboard/meta", tags=["meta"])
+app.include_router(finance_router, prefix="/api/dashboard/finance", tags=["finance"])
 
 @app.on_event("startup")
 def on_startup():
