@@ -15,6 +15,7 @@ def ops_kpis(
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
     distance_col: Optional[str] = Query(None),
+    grace_min: float = Query(0.0, description="Tolerância em minutos além do ETA"),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
@@ -32,11 +33,22 @@ def ops_kpis(
     )
     distancia_media = float(_np.nanmean(pd.to_numeric(df[distance], errors="coerce"))) if distance else 0.0
 
+    on_time_rate_pct = 0.0
+    if delivery and eta:
+        d = pd.to_numeric(df[delivery], errors="coerce")
+        e = pd.to_numeric(df[eta], errors="coerce")
+        mask = (~d.isna()) & (~e.isna())
+        d = d[mask]
+        e = e[mask]
+        if len(d) > 0:
+            on_time_rate_pct = float(((d <= (e + grace_min)).mean()) * 100)
+
     return {
         "tempo_medio_preparo": tempo_medio_preparo,
         "tempo_medio_entrega": tempo_medio_entrega,
         "atraso_medio": atraso_medio,
         "distancia_media": distancia_media,
+        "on_time_rate_pct": on_time_rate_pct,
     }
 
 
