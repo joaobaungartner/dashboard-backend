@@ -2,7 +2,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 import pandas as pd
 
-from app.main import state, resolve_column, ensure_datetime
+from app.shared import state, resolve_column, ensure_datetime
 
 
 router = APIRouter()

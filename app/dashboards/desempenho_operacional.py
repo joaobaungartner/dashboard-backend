@@ -2,8 +2,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 import pandas as pd
 
-from app.main import state, resolve_column, ensure_datetime, to_records
-from app.main import np as _np  # use numpy from main context to avoid extra import
+from app.shared import state, resolve_column, ensure_datetime, to_records
+import numpy as _np
 
 
 router = APIRouter()
