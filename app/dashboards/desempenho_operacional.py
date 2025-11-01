@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query
 import pandas as pd
 
@@ -9,6 +9,71 @@ import numpy as _np
 router = APIRouter()
 
 
+def _apply_global_filters(
+    df: pd.DataFrame,
+    *,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    platform: Optional[List[str]],
+    macro_bairro: Optional[List[str]],
+    delivery_status: Optional[str],
+    date_col: Optional[str],
+    platform_col: Optional[str],
+    macro_col: Optional[str],
+    delivery_col: Optional[str],
+    eta_col: Optional[str],
+    threshold_min: Optional[float] = None,
+):
+    dtc = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
+    plc = resolve_column(df, platform_col, "platform")
+    mcc = resolve_column(df, macro_col, "macro_bairro")
+    dlc = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    etc = resolve_column(df, eta_col, "eta_minutes_quote")
+
+    if start_date or end_date:
+        if not dtc:
+            raise HTTPException(status_code=400, detail="Coluna de data não encontrada para aplicar filtro.")
+        sdt = ensure_datetime(df, dtc)
+        if start_date:
+            try:
+                sd = pd.to_datetime(start_date)
+            except Exception:
+                raise HTTPException(status_code=422, detail="start_date inválido. Use yyyy-mm-dd")
+            df = df[sdt >= sd]
+            sdt = sdt[sdt >= sd]
+        if end_date:
+            try:
+                ed = pd.to_datetime(end_date)
+            except Exception:
+                raise HTTPException(status_code=422, detail="end_date inválido. Use yyyy-mm-dd")
+            df = df[sdt <= ed]
+
+    if platform is not None and len(platform) > 0:
+        if not plc:
+            raise HTTPException(status_code=400, detail="Coluna de plataforma não encontrada para aplicar filtro.")
+        df = df[df[plc].astype(str).isin(platform)]
+
+    if macro_bairro is not None and len(macro_bairro) > 0:
+        if not mcc:
+            raise HTTPException(status_code=400, detail="Coluna de macro_bairro não encontrada para aplicar filtro.")
+        df = df[df[mcc].astype(str).isin(macro_bairro)]
+
+    if delivery_status:
+        if delivery_status not in ("atrasado", "no_prazo"):
+            raise HTTPException(status_code=422, detail="delivery_status inválido. Use atrasado|no_prazo")
+        if not dlc or not etc:
+            raise HTTPException(status_code=400, detail="delivery_status requer delivery_col e eta_col válidos")
+        d = pd.to_numeric(df[dlc], errors="coerce")
+        e = pd.to_numeric(df[etc], errors="coerce")
+        thr = float(threshold_min) if threshold_min is not None else 0.0
+        if delivery_status == "atrasado":
+            df = df[(d - e) > thr]
+        else:
+            df = df[(d - e) <= thr]
+
+    return df, dtc, plc, mcc, dlc, etc
+
+
 @router.get("/kpis")
 def ops_kpis(
     prep_col: Optional[str] = Query(None),
@@ -16,13 +81,36 @@ def ops_kpis(
     eta_col: Optional[str] = Query(None),
     distance_col: Optional[str] = Query(None),
     grace_min: float = Query(0.0, description="Tolerância em minutos além do ETA"),
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
-    df = state.df
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
     prep = resolve_column(df, prep_col, "tempo_preparo_minutos")
-    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
-    eta = resolve_column(df, eta_col, "eta_minutes_quote")
+    delivery = dlc or resolve_column(df, delivery_col, "actual_delivery_minutes")
+    eta = etc or resolve_column(df, eta_col, "eta_minutes_quote")
     distance = resolve_column(df, distance_col, "distance_km")
 
     tempo_medio_preparo = float(_np.nanmean(pd.to_numeric(df[prep], errors="coerce"))) if prep else 0.0
@@ -132,3 +220,134 @@ def ops_scatter_distance_vs_delivery(
     return {"data": to_records(tmp.rename(columns={"x": "distance_km", "y": "delivery_minutes"}))}
 
 
+@router.get("/orders_by_hour")
+def orders_by_hour(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not dtc:
+        raise HTTPException(status_code=400, detail="Coluna de data não encontrada.")
+    sdt = ensure_datetime(df, dtc)
+    hours = sdt.dt.hour
+    g = hours.value_counts().sort_index()
+    total = int(g.sum()) if len(g) else 0
+    res = pd.DataFrame({"hour": g.index, "orders": g.values})
+    res["share"] = (res["orders"] / total).fillna(0.0)
+    return {"data": to_records(res)}
+
+
+@router.get("/late_rate_by_macro")
+def late_rate_by_macro(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=None,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not mcc or not dlc or not etc:
+        raise HTTPException(status_code=400, detail="Colunas de macro_bairro/entrega/eta não encontradas.")
+    d = pd.to_numeric(df[dlc], errors="coerce")
+    e = pd.to_numeric(df[etc], errors="coerce")
+    thr = float(threshold_min) if threshold_min is not None else 0.0
+    late_mask = (d - e) > thr
+    tmp = pd.DataFrame({mcc: df[mcc].astype(str), "late": late_mask})
+    g = tmp.groupby(mcc)["late"].agg(["sum", "count"]).reset_index()
+    g = g.rename(columns={"sum": "late_count", "count": "total", mcc: "macro_bairro"})
+    g["on_time_count"] = g["total"] - g["late_count"]
+    g["late_rate"] = (g["late_count"] / g["total"]).replace({_np.inf: _np.nan}).fillna(0.0)
+    g = g[["macro_bairro", "late_count", "on_time_count", "late_rate"]]
+    return {"data": to_records(g.sort_values("late_rate", ascending=False))}
+
+
+@router.get("/percentis_by_macro")
+def percentis_by_macro(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not mcc or not dlc:
+        raise HTTPException(status_code=400, detail="Colunas de macro_bairro/tempo de entrega não encontradas.")
+    x = pd.to_numeric(df[dlc], errors="coerce")
+    grouped = (
+        df.assign(v=x)
+        .dropna(subset=["v"]) 
+        .groupby(mcc)["v"]
+        .agg(mean="mean", p50=lambda s: s.quantile(0.5), p75=lambda s: s.quantile(0.75), p90=lambda s: s.quantile(0.9), count="count")
+        .reset_index()
+        .rename(columns={mcc: "macro_bairro"})
+    )
+    return {"data": to_records(grouped.sort_values("p90", ascending=False))}
