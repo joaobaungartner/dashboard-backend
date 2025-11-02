@@ -123,11 +123,50 @@ def finance_kpis(
     else:
         ticket_medio = 0.0
 
+    total_pedidos = int(len(df))
+
     return {
         "receita_total": receita_total,
         "receita_liquida": receita_liquida,
         "ticket_medio": ticket_medio,
+        "total_pedidos": total_pedidos,
     }
+
+
+@router.get("/orders_count")
+def finance_orders_count(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    classe_pedido: Optional[List[str]] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    classe_col: Optional[str] = Query(None),
+):
+    """
+    Retorna apenas o número total de pedidos após aplicar os filtros.
+    """
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, cpc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        classe_pedido=classe_pedido,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        classe_col=classe_col,
+    )
+    
+    total_pedidos = int(len(df))
+    
+    return {"total_pedidos": total_pedidos}
 
 
 @router.get("/timeseries_revenue")
