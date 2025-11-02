@@ -351,3 +351,183 @@ def percentis_by_macro(
         .rename(columns={mcc: "macro_bairro"})
     )
     return {"data": to_records(grouped.sort_values("p90", ascending=False))}
+
+
+@router.get("/delivery_by_weekday")
+def delivery_by_weekday(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not dtc or not dlc:
+        raise HTTPException(status_code=400, detail="Colunas de data/tempo de entrega não encontradas.")
+    sdt = ensure_datetime(df, dtc)
+    weekdays = sdt.dt.dayofweek
+    x = pd.to_numeric(df[dlc], errors="coerce")
+    tmp = pd.DataFrame({"weekday": weekdays, "v": x}).dropna()
+    grouped = tmp.groupby("weekday")["v"].apply(lambda s: list(s.dropna())).reset_index(name="values")
+    grouped = grouped.sort_values("weekday")
+    return {"data": to_records(grouped)}
+
+
+@router.get("/avg_delivery_by_hour")
+def avg_delivery_by_hour(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not dtc or not dlc:
+        raise HTTPException(status_code=400, detail="Colunas de data/tempo de entrega não encontradas.")
+    sdt = ensure_datetime(df, dtc)
+    hours = sdt.dt.hour
+    x = pd.to_numeric(df[dlc], errors="coerce")
+    tmp = pd.DataFrame({"hour": hours, "v": x}).dropna()
+    grouped = tmp.groupby("hour")["v"].mean().reset_index(name="avg_delivery_minutes")
+    grouped = grouped.sort_values("hour")
+    return {"data": to_records(grouped)}
+
+
+@router.get("/heatmap_hour_weekday")
+def heatmap_hour_weekday(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+    metric: str = Query("avg_delivery_minutes", description="avg_delivery_minutes ou avg_delay"),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not dtc or not dlc:
+        raise HTTPException(status_code=400, detail="Colunas de data/tempo de entrega não encontradas.")
+    sdt = ensure_datetime(df, dtc)
+    hours = sdt.dt.hour
+    weekdays = sdt.dt.dayofweek
+    if metric == "avg_delay":
+        if not etc:
+            raise HTTPException(status_code=400, detail="metric=avg_delay requer eta_col válido.")
+        d = pd.to_numeric(df[dlc], errors="coerce")
+        e = pd.to_numeric(df[etc], errors="coerce")
+        v = (d - e)
+    else:
+        v = pd.to_numeric(df[dlc], errors="coerce")
+    tmp = pd.DataFrame({"hour": hours, "weekday": weekdays, "v": v}).dropna()
+    grouped = tmp.groupby(["hour", "weekday"])["v"].mean().reset_index(name="value")
+    grouped = grouped.sort_values(["weekday", "hour"])
+    return {"data": to_records(grouped)}
+
+
+@router.get("/late_rate_by_platform")
+def late_rate_by_platform(
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+):
+    if state.df is None:
+        raise HTTPException(status_code=500, detail="DataFrame não carregado.")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=None,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        threshold_min=threshold_min,
+    )
+    if not plc or not dlc or not etc:
+        raise HTTPException(status_code=400, detail="Colunas de plataforma/entrega/eta não encontradas.")
+    d = pd.to_numeric(df[dlc], errors="coerce")
+    e = pd.to_numeric(df[etc], errors="coerce")
+    thr = float(threshold_min) if threshold_min is not None else 0.0
+    late_mask = (d - e) > thr
+    tmp = pd.DataFrame({plc: df[plc].astype(str), "late": late_mask})
+    g = tmp.groupby(plc)["late"].agg(["sum", "count"]).reset_index()
+    g = g.rename(columns={"sum": "late_count", "count": "total", plc: "platform"})
+    g["on_time_count"] = g["total"] - g["late_count"]
+    g["late_rate"] = (g["late_count"] / g["total"]).replace({_np.inf: _np.nan}).fillna(0.0)
+    g = g[["platform", "late_count", "on_time_count", "late_rate"]]
+    return {"data": to_records(g.sort_values("late_rate", ascending=False))}
