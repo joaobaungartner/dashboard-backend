@@ -17,11 +17,14 @@ def _apply_global_filters(
     platform: Optional[List[str]],
     macro_bairro: Optional[List[str]],
     delivery_status: Optional[str],
+    score_min: Optional[float],
+    score_max: Optional[float],
     date_col: Optional[str],
     platform_col: Optional[str],
     macro_col: Optional[str],
     delivery_col: Optional[str],
     eta_col: Optional[str],
+    score_col: Optional[str],
     threshold_min: Optional[float] = None,
 ):
     dtc = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
@@ -29,6 +32,7 @@ def _apply_global_filters(
     mcc = resolve_column(df, macro_col, "macro_bairro")
     dlc = resolve_column(df, delivery_col, "actual_delivery_minutes")
     etc = resolve_column(df, eta_col, "eta_minutes_quote")
+    scc = resolve_column(df, score_col, "satisfacao_nivel")
 
     if start_date or end_date:
         if not dtc:
@@ -71,6 +75,15 @@ def _apply_global_filters(
         else:
             df = df[(d - e) <= thr]
 
+    if score_min is not None or score_max is not None:
+        smin = 1.0 if score_min is None else float(score_min)
+        smax = 5.0 if score_max is None else float(score_max)
+        if smin > smax:
+            raise HTTPException(status_code=422, detail="score_min não pode ser maior que score_max")
+        if scc:
+            s = pd.to_numeric(df[scc], errors="coerce")
+            df = df[(s >= smin) & (s <= smax)]
+
     return df, dtc, plc, mcc, dlc, etc
 
 
@@ -86,9 +99,12 @@ def ops_kpis(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -101,11 +117,14 @@ def ops_kpis(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     prep = resolve_column(df, prep_col, "tempo_preparo_minutos")
@@ -142,13 +161,43 @@ def ops_kpis(
 
 @router.get("/timeseries_delivery")
 def ops_timeseries_delivery(
-    date_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None), freq: str = "D"
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
+    date_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
+    freq: str = "D",
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
-    df = state.df
-    dt_col = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
-    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    df = state.df.copy()
+    df, dt_col, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        score_col=score_col,
+        threshold_min=threshold_min,
+    )
+    delivery = dlc or resolve_column(df, delivery_col, "actual_delivery_minutes")
     if not dt_col or not delivery:
         raise HTTPException(status_code=400, detail="Colunas de data/tempo de entrega não encontradas.")
     sdt = ensure_datetime(df, dt_col)
@@ -165,13 +214,43 @@ def ops_timeseries_delivery(
 
 @router.get("/boxplot_delivery_by_macro")
 def ops_boxplot_delivery_by_macro(
-    macro_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None)
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
-    df = state.df
-    macro = resolve_column(df, macro_col, "macro_bairro")
-    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        score_col=score_col,
+        threshold_min=threshold_min,
+    )
+    macro = mcc
+    delivery = dlc or resolve_column(df, delivery_col, "actual_delivery_minutes")
     if not macro or not delivery:
         raise HTTPException(status_code=400, detail="Colunas de macro_bairro/tempo de entrega não encontradas.")
     grouped = (
@@ -186,14 +265,44 @@ def ops_boxplot_delivery_by_macro(
 
 @router.get("/heatmap_delay_by_macro")
 def ops_heatmap_delay_by_macro(
-    macro_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None), eta_col: Optional[str] = Query(None)
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
+    macro_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
-    df = state.df
-    macro = resolve_column(df, macro_col, "macro_bairro")
-    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
-    eta = resolve_column(df, eta_col, "eta_minutes_quote")
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        score_col=score_col,
+        threshold_min=threshold_min,
+    )
+    macro = mcc
+    delivery = dlc or resolve_column(df, delivery_col, "actual_delivery_minutes")
+    eta = etc or resolve_column(df, eta_col, "eta_minutes_quote")
     if not macro or not delivery or not eta:
         raise HTTPException(status_code=400, detail="Colunas de macro_bairro/entrega/eta não encontradas.")
     tmp = df[[macro, delivery, eta]].copy()
@@ -204,13 +313,44 @@ def ops_heatmap_delay_by_macro(
 
 @router.get("/scatter_distance_vs_delivery")
 def ops_scatter_distance_vs_delivery(
-    distance_col: Optional[str] = Query(None), delivery_col: Optional[str] = Query(None)
+    start_date: Optional[str] = Query(None),
+    end_date: Optional[str] = Query(None),
+    platform: Optional[List[str]] = Query(None),
+    macro_bairro: Optional[List[str]] = Query(None),
+    delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
+    distance_col: Optional[str] = Query(None),
+    delivery_col: Optional[str] = Query(None),
+    date_col: Optional[str] = Query(None),
+    platform_col: Optional[str] = Query(None),
+    macro_col: Optional[str] = Query(None),
+    eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
+    threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
-    df = state.df
+    df = state.df.copy()
+    df, dtc, plc, mcc, dlc, etc = _apply_global_filters(
+        df,
+        start_date=start_date,
+        end_date=end_date,
+        platform=platform,
+        macro_bairro=macro_bairro,
+        delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
+        date_col=date_col,
+        platform_col=platform_col,
+        macro_col=macro_col,
+        delivery_col=delivery_col,
+        eta_col=eta_col,
+        score_col=score_col,
+        threshold_min=threshold_min,
+    )
     distance = resolve_column(df, distance_col, "distance_km")
-    delivery = resolve_column(df, delivery_col, "actual_delivery_minutes")
+    delivery = dlc or resolve_column(df, delivery_col, "actual_delivery_minutes")
     if not distance or not delivery:
         raise HTTPException(status_code=400, detail="Colunas de distância/entrega não encontradas.")
     tmp = pd.DataFrame({
@@ -227,11 +367,14 @@ def orders_by_hour(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -244,11 +387,14 @@ def orders_by_hour(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not dtc:
@@ -269,11 +415,14 @@ def late_rate_by_macro(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -286,11 +435,14 @@ def late_rate_by_macro(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=None,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not mcc or not dlc or not etc:
@@ -315,11 +467,14 @@ def percentis_by_macro(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -332,11 +487,14 @@ def percentis_by_macro(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not mcc or not dlc:
@@ -360,11 +518,14 @@ def delivery_by_weekday(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -377,11 +538,14 @@ def delivery_by_weekday(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not dtc or not dlc:
@@ -402,11 +566,14 @@ def avg_delivery_by_hour(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -419,11 +586,14 @@ def avg_delivery_by_hour(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not dtc or not dlc:
@@ -444,11 +614,14 @@ def heatmap_hour_weekday(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     delivery_status: Optional[str] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
     metric: str = Query("avg_delivery_minutes", description="avg_delivery_minutes ou avg_delay"),
 ):
@@ -462,11 +635,14 @@ def heatmap_hour_weekday(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=delivery_status,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not dtc or not dlc:
@@ -494,11 +670,14 @@ def late_rate_by_platform(
     end_date: Optional[str] = Query(None),
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     delivery_col: Optional[str] = Query(None),
     eta_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     threshold_min: Optional[float] = Query(None),
 ):
     if state.df is None:
@@ -511,11 +690,14 @@ def late_rate_by_platform(
         platform=platform,
         macro_bairro=macro_bairro,
         delivery_status=None,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         delivery_col=delivery_col,
         eta_col=eta_col,
+        score_col=score_col,
         threshold_min=threshold_min,
     )
     if not plc or not dlc or not etc:
