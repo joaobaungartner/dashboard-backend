@@ -1,7 +1,7 @@
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Query
 import pandas as pd
-import numpy as np  # ✅ usar numpy direto
+import numpy as np
 from app.shared import state, resolve_column, ensure_datetime, to_records
 
 router = APIRouter()
@@ -15,16 +15,19 @@ def _apply_global_filters(
     platform: Optional[List[str]],
     macro_bairro: Optional[List[str]],
     classe_pedido: Optional[List[str]],
+    score_min: Optional[float],
+    score_max: Optional[float],
     date_col: Optional[str],
     platform_col: Optional[str],
     macro_col: Optional[str],
     classe_col: Optional[str],
+    score_col: Optional[str],
 ):
-    # Resolve columns
     dtc = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
     plc = resolve_column(df, platform_col, "platform")
     mcc = resolve_column(df, macro_col, "macro_bairro")
     cpc = resolve_column(df, classe_col, "order_mode")
+    scc = resolve_column(df, score_col, "satisfacao_nivel")
 
     if start_date or end_date:
         if not dtc:
@@ -59,6 +62,15 @@ def _apply_global_filters(
             raise HTTPException(status_code=400, detail="Coluna de classe_pedido não encontrada para aplicar filtro.")
         df = df[df[cpc].astype(str).isin(classe_pedido)]
 
+    if score_min is not None or score_max is not None:
+        smin = 1.0 if score_min is None else float(score_min)
+        smax = 5.0 if score_max is None else float(score_max)
+        if smin > smax:
+            raise HTTPException(status_code=422, detail="score_min não pode ser maior que score_max")
+        if scc:
+            s = pd.to_numeric(df[scc], errors="coerce")
+            df = df[(s >= smin) & (s <= smax)]
+
     return df, dtc, plc, mcc, cpc
 
 
@@ -69,6 +81,8 @@ def overview_kpis(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     total_col: Optional[str] = Query(None),
     items_col: Optional[str] = Query(None),
@@ -76,6 +90,7 @@ def overview_kpis(
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     cancel_match: str = Query("cancel", description="Texto para identificar status cancelado (case-insensitive)"),
 ):
     if state.df is None:
@@ -88,10 +103,13 @@ def overview_kpis(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
 
     total_brl_col = resolve_column(df, total_col, "total_brl")
@@ -137,10 +155,13 @@ def overview_timeseries_orders(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     freq: str = Query("D", description="D, W, M"),
 ):
     if state.df is None:
@@ -153,10 +174,13 @@ def overview_timeseries_orders(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     if not dt_col:
         raise HTTPException(status_code=400, detail="Coluna de data não encontrada.")
@@ -180,11 +204,14 @@ def overview_timeseries_revenue_with_orders(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     date_col: Optional[str] = Query(None),
     total_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     freq: str = Query("M", description="D, W, M"),
 ):
     if state.df is None:
@@ -197,10 +224,13 @@ def overview_timeseries_revenue_with_orders(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     total_brl_col = resolve_column(df, total_col, "total_brl")
     if not dt_col or not total_brl_col:
@@ -229,10 +259,13 @@ def overview_by_platform(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     platform_col: Optional[str] = Query(None),
     date_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
@@ -244,10 +277,13 @@ def overview_by_platform(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     platform_resolved = plc
     if not platform_resolved:
@@ -263,10 +299,13 @@ def overview_top_macro_bairros_by_orders(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     macro_col: Optional[str] = Query(None),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     top_n: int = Query(5, ge=1, le=50)
 ):
     if state.df is None:
@@ -279,10 +318,13 @@ def overview_top_macro_bairros_by_orders(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     macro = mcc
     if not macro:
@@ -304,11 +346,14 @@ def overview_status_distribution(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     status_col: Optional[str] = Query(None),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
@@ -320,10 +365,13 @@ def overview_status_distribution(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     status = resolve_column(df, status_col, "status")
     if not status:
@@ -340,12 +388,15 @@ def overview_ticket_histogram(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     total_col: Optional[str] = Query(None),
     items_col: Optional[str] = Query(None),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     macro_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
     bins: int = Query(15, ge=3, le=100),
 ):
     if state.df is None:
@@ -358,10 +409,13 @@ def overview_ticket_histogram(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     total_brl_col = resolve_column(df, total_col, "total_brl")
     num_itens_col = resolve_column(df, items_col, "num_itens")
@@ -393,11 +447,14 @@ def overview_macro_bairro_avg_receita(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     macro_col: Optional[str] = Query(None),
     total_col: Optional[str] = Query(None),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
@@ -409,10 +466,13 @@ def overview_macro_bairro_avg_receita(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     macro = mcc
     total_brl_col = resolve_column(df, total_col, "total_brl")
@@ -422,8 +482,6 @@ def overview_macro_bairro_avg_receita(
     return {"data": to_records(g.sort_values("avg_receita", ascending=False))}
 
 
-# Dados para choropleth por macro_bairro (para react-simple-maps)
-# metric: 'avg_receita' | 'orders' | 'total_receita'
 @router.get("/macro_bairro_choropleth")
 def overview_macro_bairro_choropleth(
     start_date: Optional[str] = Query(None),
@@ -431,12 +489,15 @@ def overview_macro_bairro_choropleth(
     platform: Optional[List[str]] = Query(None),
     macro_bairro: Optional[List[str]] = Query(None),
     classe_pedido: Optional[List[str]] = Query(None),
+    score_min: Optional[float] = Query(None, ge=1, le=5),
+    score_max: Optional[float] = Query(None, ge=1, le=5),
     metric: str = Query("avg_receita"),
     macro_col: Optional[str] = Query(None),
     total_col: Optional[str] = Query(None),
     date_col: Optional[str] = Query(None),
     platform_col: Optional[str] = Query(None),
     classe_col: Optional[str] = Query(None),
+    score_col: Optional[str] = Query(None),
 ):
     if state.df is None:
         raise HTTPException(status_code=500, detail="DataFrame não carregado.")
@@ -448,10 +509,13 @@ def overview_macro_bairro_choropleth(
         platform=platform,
         macro_bairro=macro_bairro,
         classe_pedido=classe_pedido,
+        score_min=score_min,
+        score_max=score_max,
         date_col=date_col,
         platform_col=platform_col,
         macro_col=macro_col,
         classe_col=classe_col,
+        score_col=score_col,
     )
     macro = mcc
     total_brl_col = resolve_column(df, total_col, "total_brl")
@@ -465,7 +529,7 @@ def overview_macro_bairro_choropleth(
         if not total_brl_col:
             raise HTTPException(status_code=400, detail="Coluna total_brl não encontrada para total_receita.")
         g = df.groupby(macro)[total_brl_col].sum().reset_index(name="value")
-    else:  # avg_receita
+    else:
         if not total_brl_col:
             raise HTTPException(status_code=400, detail="Coluna total_brl não encontrada para avg_receita.")
         g = df.groupby(macro)[total_brl_col].mean().reset_index(name="value")

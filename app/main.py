@@ -52,7 +52,6 @@ def select_columns(df: pd.DataFrame, columns: Optional[List[str]]) -> pd.DataFra
         raise HTTPException(status_code=400, detail=f"Colunas inválidas: {missing}")
     return df[columns]
 
-# Routers
 app.include_router(ops_router, prefix="/api/dashboard/ops", tags=["ops"])
 app.include_router(overview_router, prefix="/api/dashboard/overview", tags=["overview"])
 app.include_router(satisfaction_router, prefix="/api/dashboard/satisfaction", tags=["satisfaction"])

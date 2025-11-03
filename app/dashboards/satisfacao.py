@@ -25,7 +25,6 @@ def _apply_global_filters(
     score_col: Optional[str],
     eta_col: Optional[str],
 ):
-    # Resolve columns
     dtc = resolve_column(df, date_col, "order_datetime") or resolve_column(df, date_col, "order_date")
     plc = resolve_column(df, platform_col, "platform")
     mcc = resolve_column(df, macro_col, "macro_bairro")
@@ -61,7 +60,6 @@ def _apply_global_filters(
             raise HTTPException(status_code=400, detail="Coluna de macro_bairro não encontrada para aplicar filtro.")
         df = df[df[mcc].astype(str).isin(macro_bairro)]
 
-    # Score defaults [1,5] quando não informado
     smin = 1.0 if score_min is None else float(score_min)
     smax = 5.0 if score_max is None else float(score_max)
     if smin > smax:
@@ -238,11 +236,9 @@ def satisfaction_scatter_time_vs_score(
         "satisfacao": pd.to_numeric(df[score], errors="coerce"),
         "eta_minutes": pd.to_numeric(df[etc], errors="coerce") if etc else None,
     })
-    tmp = tmp.dropna(subset=["delivery_minutes", "satisfacao"])  # evita NaNs nas séries principais
-    # Converte datetime para string ISO para resposta
+    tmp = tmp.dropna(subset=["delivery_minutes", "satisfacao"])
     if "date" in tmp.columns and tmp["date"].notna().any():
         tmp["date"] = tmp["date"].astype("datetime64[ns]").astype(str)
-    # Remove colunas totalmente None (se não resolvemos id/eta/platform/macro)
     for c in ["order_id", "platform", "macro_bairro", "eta_minutes"]:
         if c in tmp.columns and tmp[c].isna().all():
             tmp = tmp.drop(columns=[c])
@@ -354,7 +350,6 @@ def satisfaction_heatmap_platform(
         .reset_index()
         .rename(columns={plc: "platform", scc: "avg_satisfacao", 0: "count"})
     )
-    # Corrige nomes caso concat renomeie automaticamente
     if "count" not in g.columns:
         g.columns = ["platform", "avg_satisfacao", "count"]
     return {"data": to_records(g)}
